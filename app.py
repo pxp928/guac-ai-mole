@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 
 import streamlit as st
 import requests
@@ -115,21 +116,63 @@ def answer_question(query: str):
     graphql_fields = (
         get_schema()
     )
-    image_example = """
-    ## List running images using terminal tool
-    kubectl get pods --all-namespaces -o go-template --template='{{range .items}}{{range .spec.containers}}{{.image}} {{end}}{{end}}'
-    """
+
+    graphql_string = json.dumps(graphql_fields, indent=4)
+
+    # image_example = """
+    # ## List running images using terminal tool
+    # kubectl get pods --all-namespaces -o go-template --template='{{range .items}}{{range .spec.containers}}{{.image}} {{end}}{{end}}'
+    # """
 
     gql_examples = """
-    ## Use this query when user asks what are dependencies of an image. When querying for the dependencies of a given package, you must specify the package field. When the query is about images, the oci package type should be used.
-    query IsDependencyQ1 {
-    IsDependency(isDependencySpec: { package: { type: "oci" name: "alpine" }}) {
-    dependencyPackage {
-      type
-        namespaces {
-          namespace
-            names {
-              name
+
+    ## Use this query when user asks what to provide all the vulnerabilities of a package (like alpine or vul-image-latest). If the name is provided, fill in the name field (which in this example is alpine). Keep the name exactly as it was typed by the user. You must query further with FindPkgVulnsBasedOnSBOMs by passing in the returned ID to see if the package from this query has vulnerabilities.
+    query HasSBOMQ2 {
+      HasSBOM(hasSBOMSpec: {
+        subject: { package: { name: "alpine" } } }) {
+        id
+      }
+    }
+
+    ## Use this query when user asks if a package contains vulnerabilities, this will return all the vulnerabilities. First, HasSBOMQ2 m\\ust be called, and the returned ID must be passed into the hasSBOMID field (for example: bill_of_materials:9ed27267-5a7e-5faf-8fe9-41d58eca38c1).
+    query FindPkgVulnsBasedOnSBOMs {
+      findAllPkgVulnBasedOnSBOM(
+        hasSBOMID: "bill_of_materials:9ed27267-5a7e-5faf-8fe9-41d58eca38c1"
+      ) {
+        __typename
+        ... on CertifyVuln {
+          package {
+            namespaces {
+              names {
+                name
+                versions {
+                  id
+                  purl
+                  version
+                }
+              }
+            }
+          }
+          vulnerability {
+            vulnerabilityIDs {
+              vulnerabilityID
+            }
+          }
+        }
+      }
+    }
+
+    ## Use this query when user asks what are dependencies of a package (like alpine or vul-image-latest). If the name is provided, fill in the name field (which in this example is alpine). Keep the name exactly as it was typed by the user.
+    query HasSBOMQ1 {
+      HasSBOM(hasSBOMSpec: {
+        subject: { package: { name: "alpine" } } }) {
+        id
+        includedDependencies {
+          dependencyPackage {
+            namespaces {
+              names {
+                name
+              }
             }
           }
         }
@@ -139,7 +182,6 @@ def answer_question(query: str):
     ## Use this query when user asks what images depend on a package (like logrus). When querying for packages that depends on another package, you must specify the dependencyPackage field. When the query is about images, the oci package type should be used.
     query IsDependencyQ2 {
     IsDependency(isDependencySpec: {
-        package: { type: "oci" }
         dependencyPackage: { name: "logrus" }
     }) {
       package {
@@ -154,7 +196,7 @@ def answer_question(query: str):
     }
 
     ## Use this query when user asks about a vulnerability id, this will return a package that has the vulnerability. You must query further with IsDependencyQ2 to see what images includes this package.
-    query CertifyVulnQ1 {
+    query CertifyVulnQ2 {
     CertifyVuln(certifyVulnSpec: {vulnerability: {vulnerabilityID: "dsa-5122-1"}}) {
       package {
         namespaces {
@@ -168,24 +210,23 @@ def answer_question(query: str):
     """
 
     prompt = f"""
-    Do NOT, under any circumstances, use ``` anywhere.
-
-    To check if an image is running, use the terminal tool to list all running images with kubectl. Example:
-    {image_example} Only execute this based on the graphql answer, determine if the image is running.
-
-    Consider the syntax as image name followed by a dash and tag. For example, if 'bar-latest' is returned as part of graphql query, and terminal output contains 'foo/bar:latest' then consider it as running.
+    Do NOT, under any circumstances, use backticks anywhere. Make sure the GraphQL query is correctly formatted.
 
     Here are some example queries for the graphql endpoint described below:
     {gql_examples}
 
-    Answer the following question: {query} by using either terminal or the graphql database that has this schema {graphql_fields}. action_input should not contain a seperate query key. action_input should only have the query itself."""
-
+    Answer the following question: {query} by using the graphql database with the schema {graphql_string}. action_input should not contain a separate query key. action_input should only have the query itself."""
     try:
         result = agent.run(prompt)
     except Exception as e:
         prompt += f"\n\nThere was an error with the request.\nError: {e}\n\nPlease reformat GraphQL query (avoid issues with backticks if possible)."
-        result = agent.run(prompt)
-
+        try:
+          result = agent.run(prompt)
+        except ValueError as e:
+          result = str(e)
+          if not result.startswith("Could not parse LLM output: `"):
+            raise e
+          result = result.removeprefix("Could not parse LLM output: `").removesuffix("`")
     return result
 
 
@@ -217,7 +258,7 @@ if user_openai_api_key:
         )
 
     tools = load_tools(
-        ["graphql", "terminal"],
+        ["graphql"],
         graphql_endpoint=user_graphql_endpoint,
         llm=llm,
     )
